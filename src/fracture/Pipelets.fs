@@ -15,41 +15,25 @@ type Message<'a, 'b> =
     | Attach of 'b IPipeletInput
     | Detach of 'b IPipeletInput
 
-/// A pipelet is a named, write-only agent that processes incoming messages then publishes the results to the next pipeline stage(s).
-type Pipelet<'a, 'b>(name:string, transform:'a -> 'b seq, router:'b seq -> 'b IPipeletInput seq -> unit, maxcount, maxwait:int, ?overflow, ?errors) = 
+/// A pipelet is a agent that transforms incoming messages then publishes the results
+/// to the next pipeline stages according to the routing strategy.
+type Pipelet<'a, 'b>(name:string,
+                     transform:'a -> 'b seq, 
+                     router:'b seq -> 'b IPipeletInput seq -> unit, 
+                     maxcount, 
+                     maxwait:int, 
+                     ?overflow, 
+                     ?errors) = 
 
     let mutable disposed = false
     let ss = new SemaphoreSlim(maxcount, maxcount)
-    let overflow = defaultArg overflow (fun x -> printf "%A Overflow: %A" DateTime.Now.TimeOfDay x)
-    let errors = defaultArg errors (fun (e:Exception) -> printf "%A Processing error: %A" DateTime.Now.TimeOfDay e.Message)
+    let overflow = defaultArg overflow (fun x -> Console.WriteLine(sprintf "%A Overflow: %A" DateTime.Now.TimeOfDay x))
+    let errors = defaultArg errors (fun (e:Exception) -> Console.WriteLine(sprintf "%A Processing error: %A" DateTime.Now.TimeOfDay e.Message))
 
     let dispose disposing =
         if not disposed then
             if disposing then ss.Dispose()
             disposed <- true
-
-//    let mailbox = MailboxProcessor.Start(fun inbox ->
-//        let rec loop routes = async {
-//            let! msg = inbox.Receive()
-//            match msg with
-//            | Payload(data) ->
-//                ss.Release() |> ignore
-//                try
-//                    data |> transform |> router <| routes
-//                with //force loop resume on error
-//                | ex -> errors ex
-//                return! loop routes
-//            | Attach(stage) -> return! loop (stage::routes)
-//            | Detach(stage) -> return! loop (List.filter (fun x -> x <> stage) routes)
-//        }
-//        loop [])
-          
-    let computeAndRoute data routes = 
-        try
-            data |> transform |> router <| routes
-            Choice1Of2()
-        with 
-        | ex -> Choice2Of2 ex
 
     let mailbox = MailboxProcessor.Start(fun inbox ->
         let rec loop routes = async {
@@ -57,31 +41,16 @@ type Pipelet<'a, 'b>(name:string, transform:'a -> 'b seq, router:'b seq -> 'b IP
             match msg with
             | Payload(data) ->
                 ss.Release() |> ignore
-                match computeAndRoute data routes with
-                | Choice1Of2 _ -> ()
-                | Choice2Of2 exn -> errors exn
+                try
+                    data |> transform |> router <| routes
+                with //force loop resume on error
+                | ex -> errors ex
                 return! loop routes
             | Attach(stage) -> return! loop (stage::routes)
             | Detach(stage) -> return! loop (List.filter (fun x -> x <> stage) routes)
         }
         loop [])
-
-//    let mailbox = MailboxProcessor.Start(fun inbox ->
-//      let rec loop routes = async {
-//        let! msg = inbox.Receive()
-//        match msg with
-//        | Payload(data) ->
-//          ss.Release() |> ignore
-//          let result = async{data |> transform |> router <| routes} |> Async.Catch |> Async.RunSynchronously
-//          match result with
-//          | Choice1Of2() -> ()
-//          | Choice2Of2 exn -> errors exn
-//          return! loop routes
-//        | Attach(stage) -> return! loop (stage::routes)
-//        | Detach(stage) -> return! loop (List.filter (fun x -> x <> stage) routes)
-//      }
-//      loop [])
-
+          
     interface IPipeletInput<'a> with
         /// Posts a message to the pipelet input.
         member this.Post(data) = 
@@ -138,7 +107,7 @@ module Routers =
                 messages |> Seq.iter (fun msg -> route |> Seq.iter (fun (s:'a IPipeletInput) -> s.Post msg) )
         createRoundRobin
 
-    /// Simply picks the first route
+    /// Picks the first route
     let basicRouter messages (routes:'a IPipeletInput seq) =
         if routes |> Seq.isEmpty then ()
         else let route = routes |> Seq.head in messages |> Seq.iter (fun msg -> route.Post msg)
